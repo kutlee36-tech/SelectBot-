@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ChatbotConfig, Workspace, BotAnalytics } from './types';
 import { api } from './services/api';
 import { Header } from './components/Header';
@@ -12,15 +12,18 @@ import { DeploymentView } from './components/DeploymentView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { CreateBotModal } from './components/CreateBotModal';
 import { ChatPreview } from './components/ChatPreview';
-import { Bot, ChevronDown, Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
+import { LoginView } from './components/LoginView';
+import { ChevronDown, AlertCircle, RefreshCw } from 'lucide-react';
 
 import { useFirebaseAuth } from './context/FirebaseAuthContext';
 import { firestoreSync } from './services/firestoreSync';
+import { firebaseAuthService } from './services/firebaseAuthService';
 
 export default function App() {
-  const { user } = useFirebaseAuth();
+  const { user, loading: authLoading, signInWithGoogle } = useFirebaseAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [guestMode, setGuestMode] = useState(false);
 
   // Core Data
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -41,36 +44,47 @@ export default function App() {
   const [embedBot, setEmbedBot] = useState<ChatbotConfig | null>(null);
   const [embedError, setEmbedError] = useState<string | null>(null);
 
-  const loadAllData = async () => {
+  // Load App Data from Firebase & Firestore as the single source of truth
+  const loadAppData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
-      const me = await api.getMe();
-      setWorkspaces(me.workspaces);
-      const activeWs = me.workspaces[0];
-      setCurrentWorkspace(activeWs);
+      if (user) {
+        // Authenticated user: Initialize from Firestore
+        const session = await firebaseAuthService.initUserSession(user);
+        setWorkspaces(session.workspaces);
+        const activeWs = session.currentWorkspace || session.workspaces[0];
+        setCurrentWorkspace(activeWs);
+        setBots(session.bots);
 
-      const botList = await api.getBots(activeWs?.id);
-      setBots(botList);
-
-      if (botList.length > 0 && !activeBotId) {
-        setActiveBotId(botList[0].id);
+        if (session.bots.length > 0) {
+          setActiveBotId((prev) => (prev && session.bots.some((b) => b.id === prev) ? prev : session.bots[0].id));
+        }
+        setAnalytics(session.analytics);
+      } else if (guestMode) {
+        // Guest mode fallback
+        const session = firebaseAuthService.getGuestSession();
+        setWorkspaces(session.workspaces);
+        setCurrentWorkspace(session.currentWorkspace || session.workspaces[0]);
+        setBots(session.bots);
+        if (session.bots.length > 0) {
+          setActiveBotId(session.bots[0].id);
+        }
+        setAnalytics(session.analytics);
       }
-
-      const stats = await api.getAnalytics();
-      setAnalytics(stats);
     } catch (err: any) {
-      console.error('Failed to initialize app', err);
-      setError(err.message || 'Failed to connect to backend server');
+      console.error('Failed to initialize app from Firebase', err);
+      setError(err?.message || 'Failed to initialize application from Firestore.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [user, guestMode]);
 
+  // Main bootstrap sequence
   useEffect(() => {
     if (isEmbedMode && embedDeploymentId) {
-      // In embed mode, fetch public bot by deployment ID
+      // In embed mode, fetch public bot by deployment ID directly
       api
         .getPublicBot(embedDeploymentId)
         .then((publicBot) => {
@@ -78,19 +92,30 @@ export default function App() {
           setLoading(false);
         })
         .catch((err) => {
-          setEmbedError(err.message || 'This chatbot widget is currently disabled or in draft mode.');
+          setEmbedError(err?.message || 'This chatbot widget is currently disabled or in draft mode.');
           setLoading(false);
         });
-    } else {
-      loadAllData();
+      return;
     }
-  }, [isEmbedMode, embedDeploymentId]);
+
+    if (authLoading) {
+      // Waiting for Firebase auth state resolution
+      return;
+    }
+
+    if (user || guestMode) {
+      loadAppData();
+    } else {
+      setLoading(false);
+    }
+  }, [isEmbedMode, embedDeploymentId, authLoading, user, guestMode, loadAppData]);
 
   // Update a single bot in state & sync to Firestore if authenticated
   const handleUpdateBot = (updated: ChatbotConfig) => {
     setBots((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
-    if (user?.uid) {
-      firestoreSync.saveChatbot(updated, user.uid).catch((e) => {
+    const uid = user?.uid || (guestMode ? 'guest_user' : null);
+    if (uid) {
+      firestoreSync.saveChatbot(updated, uid).catch((e) => {
         console.warn('Firestore bot sync notice:', e);
       });
     }
@@ -100,8 +125,9 @@ export default function App() {
     setBots((prev) => [newBot, ...prev]);
     setActiveBotId(newBot.id);
     setCurrentTab('builder');
-    if (user?.uid) {
-      firestoreSync.saveChatbot(newBot, user.uid).catch((e) => {
+    const uid = user?.uid || (guestMode ? 'guest_user' : null);
+    if (uid) {
+      firestoreSync.saveChatbot(newBot, uid).catch((e) => {
         console.warn('Firestore new bot sync notice:', e);
       });
     }
@@ -134,6 +160,33 @@ export default function App() {
         </div>
       );
     }
+  }
+
+  // Loading state while resolving auth
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-black text-base shadow-xs">
+            S
+          </div>
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+            <span>Connecting to Firebase & Cloud Firestore...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Unauthenticated Guard: Show LoginView with Google Sign-in & Guest Access
+  if (!user && !guestMode) {
+    return (
+      <LoginView
+        onSignInWithGoogle={signInWithGoogle}
+        onContinueAsGuest={() => setGuestMode(true)}
+      />
+    );
   }
 
   const activeBot = bots.find((b) => b.id === activeBotId) || bots[0];
@@ -231,14 +284,14 @@ export default function App() {
         ) : error ? (
           <div className="max-w-md mx-auto my-12 p-5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 space-y-2">
             <div className="flex items-center gap-2 font-bold text-sm text-rose-900">
-              <AlertCircle className="w-4 h-4" /> Connection Error
+              <AlertCircle className="w-4 h-4" /> Connection Notice
             </div>
             <p>{error}</p>
             <button
-              onClick={loadAllData}
+              onClick={loadAppData}
               className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded font-semibold text-xs hover:bg-rose-700 cursor-pointer"
             >
-              Retry Connection
+              Retry
             </button>
           </div>
         ) : (
@@ -261,7 +314,7 @@ export default function App() {
               <ConversationBuilder
                 bot={activeBot}
                 onUpdateBot={handleUpdateBot}
-                onRefreshAll={loadAllData}
+                onRefreshAll={loadAppData}
               />
             )}
 
