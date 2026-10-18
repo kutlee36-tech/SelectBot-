@@ -242,22 +242,7 @@ app.get('/widget.js', (req: Request, res: Response) => {
 // API Routes
 // -------------------------------------------------------------
 
-// 1. Auth & Workspace
-app.get('/api/auth/me', (req: Request, res: Response) => {
-  const workspaces = DB.getWorkspaces();
-  const currentWs = workspaces[0];
-  res.json({
-    user: {
-      id: 'user_1',
-      name: 'Alex Morgan',
-      email: 'kutlee36@gmail.com',
-      role: 'owner',
-      currentWorkspaceId: currentWs ? currentWs.id : 'ws_default_1',
-    },
-    workspaces,
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'),
-  });
-});
+// 1. Workspaces (Authentication handled exclusively by Firebase Authentication & Firestore)
 
 app.post('/api/workspaces', (req: Request, res: Response) => {
   const { name, industry } = req.body;

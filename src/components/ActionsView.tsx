@@ -26,11 +26,11 @@ export function ActionsView({ bots }: ActionsViewProps) {
   const loadSubmissions = async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/actions/submissions/all');
-      const data = await res.json();
-      setSubmissions(data);
+      const data = await api.getActionSubmissions();
+      setSubmissions(data || []);
     } catch (err) {
-      console.error('Failed to load action submissions', err);
+      console.warn('Notice loading action submissions:', err);
+      setSubmissions([]);
     } finally {
       setLoading(false);
     }
